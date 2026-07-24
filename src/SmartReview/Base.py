@@ -37,10 +37,16 @@ class Associate(set):
         super(Associate, self).add(word)
 
     def remove(self, word: str):
-        """ 移除关联词 """
+        """ 移除关联词（若不存在则抛出KeyError） """
         if isinstance(word, Vocabulary):
             word = word.value  # 获取单词
         super(Associate, self).remove(word)
+
+    def discard(self, word: str):
+        """ 移除关联词（若不存在则静默忽略，不抛异常） """
+        if isinstance(word, Vocabulary):
+            word = word.value
+        super(Associate, self).discard(word)
 
     @classmethod
     def load(cls, your_list=None):
@@ -282,12 +288,13 @@ class Vocabulary(object):
     """ 词汇 """
     rank_table = ['精通', '掌握', '记住', '清晰', '模糊', '混淆', '忘记', '顽固', '待定']  # 精通,掌握,记住,清晰后移,待定与模糊不动,混淆,忘记,顽固前移
 
-    def __init__(self, word, explain, review_index=None, datas=None, associate=None):
+    def __init__(self, word, explain, review_index=None, datas=None, associate=None, notes=None):
         # super(Vocabulary, self).__init__()
         self.value = word  # 词汇
         self.explain = explain  # 释义
         self.daylog = DayLog.load(datas)  # 多级日志表
         self.associate = Associate.load(associate)  # 关联词
+        self.notes = notes or ''  # 个人笔记/备注
         self.review = ReviewManage.load(self.daylog, review_index)  # 复习管理
 
     def __repr__(self):
@@ -360,8 +367,9 @@ class Vocabulary(object):
         data = dic.get('data')
         review_index = dic.get('review_index')
         associate = dic.get('associate')
+        notes = dic.get('notes', '')  # 兼容旧数据，无笔记字段默认为空字符串
         # 将 row_data 中的值都转换成 record 类型,因为是二级列表所以才会下面这么麻烦
-        self = cls(word, explain, review_index, data, associate)
+        self = cls(word, explain, review_index, data, associate, notes)
         return self
 
     def update_status(self):
@@ -384,7 +392,8 @@ class Vocabulary(object):
         """ 序列化 """
         return {'word': self.value, 'explain': self.explain, 'review_index': self.review.dump(),
                 'data': self.daylog.dump(),
-                'associate': self.associate.dump()}
+                'associate': self.associate.dump(),
+                'notes': self.notes}
 
 
 class Dictionary(UserDict):

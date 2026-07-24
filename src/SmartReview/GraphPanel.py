@@ -449,12 +449,9 @@ class GraphView(QGraphicsView):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            # 从两个单词的associate集合中互相移除
-            try:
-                node_a.word_obj.associate.remove(word_b)
-                node_b.word_obj.associate.remove(word_a)
-            except KeyError:
-                pass
+            # 从两个单词的associate集合中互相移除（使用discard避免KeyError）
+            node_a.word_obj.associate.discard(word_b)
+            node_b.word_obj.associate.discard(word_a)
             # 移除边
             for edge in self.scene.edges[:]:
                 if (edge.source == node_a and edge.target == node_b) or \

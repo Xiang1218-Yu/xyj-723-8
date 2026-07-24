@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
     QSlider, QLCDNumber, QTableWidget, QTableWidgetItem, QHeaderView,
     QRadioButton, QButtonGroup, QPushButton, QListWidget, QListWidgetItem,
     QLineEdit, QSplitter, QWidget, QComboBox, QCheckBox, QMessageBox,
-    QFileDialog, QInputDialog, QTabWidget, QSpinBox, QAbstractItemView,
+    QFileDialog, QInputDialog, QTabWidget, QAbstractItemView,
     QScrollArea, QFrame
 )
 
@@ -30,14 +30,10 @@ class ConfigEnhancedDialog(QDialog):
     """增强配置对话框 - 支持更多筛选维度和预设管理"""
 
     def __init__(self, book, parent=None):
-        """
-        初始化增强配置对话框
-        :param book: LearnTactics/Dictionary对象
-        """
         super().__init__(parent)
         self.book = book
         self.setWindowTitle('复习配置（增强版）')
-        self.resize(1100, 750)
+        self.resize(1100, 780)
         self.presets = self._load_presets()
         self._setup_ui()
         self._connect_signals()
@@ -98,20 +94,43 @@ class ConfigEnhancedDialog(QDialog):
         new_dim_group = QGroupBox('新增筛选维度')
         new_dim_layout = QGridLayout(new_dim_group)
 
-        # 单词长度范围
+        # 单词长度范围 - 使用双滑条实现
         new_dim_layout.addWidget(QLabel('单词长度范围:'), 0, 0)
-        len_layout = QHBoxLayout()
-        self.len_min_spin = QSpinBox()
-        self.len_min_spin.setRange(1, 30)
-        self.len_min_spin.setValue(1)
-        self.len_min_spin.setPrefix('最短: ')
-        len_layout.addWidget(self.len_min_spin)
-        self.len_max_spin = QSpinBox()
-        self.len_max_spin.setRange(1, 30)
-        self.len_max_spin.setValue(20)
-        self.len_max_spin.setPrefix('最长: ')
-        len_layout.addWidget(self.len_max_spin)
-        new_dim_layout.addLayout(len_layout, 0, 1)
+        len_slider_layout = QVBoxLayout()
+
+        # 最短长度滑条
+        len_min_layout = QHBoxLayout()
+        len_min_layout.addWidget(QLabel('最短:'))
+        self.len_min_slider = QSlider(Qt.Horizontal)
+        self.len_min_slider.setRange(1, 30)
+        self.len_min_slider.setValue(1)
+        self.len_min_slider.setTickPosition(QSlider.TicksBelow)
+        self.len_min_slider.setTickInterval(5)
+        len_min_layout.addWidget(self.len_min_slider)
+        self.len_min_lcd = QLCDNumber()
+        self.len_min_lcd.setDigitCount(2)
+        self.len_min_lcd.setFixedWidth(45)
+        self.len_min_lcd.display(1)
+        len_min_layout.addWidget(self.len_min_lcd)
+        len_slider_layout.addLayout(len_min_layout)
+
+        # 最长长度滑条
+        len_max_layout = QHBoxLayout()
+        len_max_layout.addWidget(QLabel('最长:'))
+        self.len_max_slider = QSlider(Qt.Horizontal)
+        self.len_max_slider.setRange(1, 30)
+        self.len_max_slider.setValue(20)
+        self.len_max_slider.setTickPosition(QSlider.TicksBelow)
+        self.len_max_slider.setTickInterval(5)
+        len_max_layout.addWidget(self.len_max_slider)
+        self.len_max_lcd = QLCDNumber()
+        self.len_max_lcd.setDigitCount(2)
+        self.len_max_lcd.setFixedWidth(45)
+        self.len_max_lcd.display(20)
+        len_max_layout.addWidget(self.len_max_lcd)
+        len_slider_layout.addLayout(len_max_layout)
+
+        new_dim_layout.addLayout(len_slider_layout, 0, 1)
 
         # 首字母多选
         new_dim_layout.addWidget(QLabel('首字母筛选:'), 1, 0)
@@ -151,14 +170,14 @@ class ConfigEnhancedDialog(QDialog):
         assoc_layout.addStretch()
         new_dim_layout.addLayout(assoc_layout, 2, 1)
 
-        # 笔记过滤（这里用复习次数作为代理，因为原代码没有笔记字段，用有历史记录的判断）
-        new_dim_layout.addWidget(QLabel('复习记录:'), 3, 0)
-        record_layout = QHBoxLayout()
-        self.record_combo = QComboBox()
-        self.record_combo.addItems(['全部', '有复习记录', '从未复习'])
-        record_layout.addWidget(self.record_combo)
-        record_layout.addStretch()
-        new_dim_layout.addLayout(record_layout, 3, 1)
+        # 笔记过滤（独立实现，基于Vocabulary.notes字段）
+        new_dim_layout.addWidget(QLabel('笔记状态:'), 3, 0)
+        notes_layout = QHBoxLayout()
+        self.notes_combo = QComboBox()
+        self.notes_combo.addItems(['全部', '有笔记', '无笔记'])
+        notes_layout.addWidget(self.notes_combo)
+        notes_layout.addStretch()
+        new_dim_layout.addLayout(notes_layout, 3, 1)
 
         left_layout.addWidget(new_dim_group)
 
@@ -242,8 +261,10 @@ class ConfigEnhancedDialog(QDialog):
 
         right_layout.addWidget(QLabel('📋 实时预览（前50个符合条件的单词）'))
         self.preview_table = QTableWidget()
-        self.preview_table.setColumnCount(5)
-        self.preview_table.setHorizontalHeaderLabels(['单词', '释义', '掌握度', '长度', '关联数'])
+        self.preview_table.setColumnCount(6)
+        self.preview_table.setHorizontalHeaderLabels(
+            ['单词', '释义', '掌握度', '长度', '关联数', '笔记']
+        )
         self.preview_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.preview_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.preview_table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -261,20 +282,36 @@ class ConfigEnhancedDialog(QDialog):
 
     def _connect_signals(self):
         """连接信号槽"""
+        # 复习量滑条
         self.countSlider.valueChanged.connect(self.countLCD.display)
+        # 长度滑条联动LCD
+        self.len_min_slider.valueChanged.connect(self.len_min_lcd.display)
+        self.len_max_slider.valueChanged.connect(self.len_max_lcd.display)
+        # 长度滑条互斥约束：最短<=最长
+        self.len_min_slider.valueChanged.connect(self._on_len_min_changed)
+        self.len_max_slider.valueChanged.connect(self._on_len_max_changed)
         # 所有筛选条件变化时刷新预览
         self.ranks_list.itemSelectionChanged.connect(self._refresh_preview)
         self.times_list.itemSelectionChanged.connect(self._refresh_preview)
-        self.len_min_spin.valueChanged.connect(self._refresh_preview)
-        self.len_max_spin.valueChanged.connect(self._refresh_preview)
+        self.len_min_slider.valueChanged.connect(self._refresh_preview)
+        self.len_max_slider.valueChanged.connect(self._refresh_preview)
         self.assoc_combo.currentTextChanged.connect(self._refresh_preview)
-        self.record_combo.currentTextChanged.connect(self._refresh_preview)
+        self.notes_combo.currentTextChanged.connect(self._refresh_preview)
+
+    def _on_len_min_changed(self, value):
+        """最短长度变化时，确保不超过最长"""
+        if value > self.len_max_slider.value():
+            self.len_max_slider.setValue(value)
+
+    def _on_len_max_changed(self, value):
+        """最长长度变化时，确保不短于最短"""
+        if value < self.len_min_slider.value():
+            self.len_min_slider.setValue(value)
 
     def _set_all_letters(self, checked):
         """全选/清空首字母"""
         for cb in self.letter_checks.values():
             cb.setChecked(checked)
-        # 手动触发刷新（stateChanged已连接，但setChecked会触发）
 
     def _get_selected_letters(self):
         """获取选中的首字母集合"""
@@ -293,10 +330,10 @@ class ConfigEnhancedDialog(QDialog):
         ranks = self._get_selected_ranks()
         times = self._get_selected_times()
         selected_letters = set(self._get_selected_letters())
-        len_min = self.len_min_spin.value()
-        len_max = self.len_max_spin.value()
+        len_min = self.len_min_slider.value()
+        len_max = self.len_max_slider.value()
         assoc_filter = self.assoc_combo.currentText()
-        record_filter = self.record_combo.currentText()
+        notes_filter = self.notes_combo.currentText()
 
         filtered = []
         for word in sorted(self.book.values(), key=lambda w: w.priority):
@@ -318,11 +355,11 @@ class ConfigEnhancedDialog(QDialog):
                 continue
             if assoc_filter == '无关联词' and len(word.associate) > 0:
                 continue
-            # 复习记录筛选
-            has_records = len(word.daylog.data) > 0
-            if record_filter == '有复习记录' and not has_records:
+            # 笔记筛选（基于真实notes字段）
+            has_notes = bool(word.notes and word.notes.strip())
+            if notes_filter == '有笔记' and not has_notes:
                 continue
-            if record_filter == '从未复习' and has_records:
+            if notes_filter == '无笔记' and has_notes:
                 continue
             filtered.append(word)
 
@@ -349,6 +386,13 @@ class ConfigEnhancedDialog(QDialog):
             self.preview_table.setItem(row, 2, QTableWidgetItem(word.rank))
             self.preview_table.setItem(row, 3, QTableWidgetItem(str(len(word.value))))
             self.preview_table.setItem(row, 4, QTableWidgetItem(str(len(word.associate))))
+            # 笔记状态显示
+            note_status = '📝' if (word.notes and word.notes.strip()) else '-'
+            note_tip = word.notes[:30] + '...' if (word.notes and len(word.notes) > 30) else (word.notes or '')
+            note_item = QTableWidgetItem(note_status)
+            if note_tip:
+                note_item.setToolTip(note_tip)
+            self.preview_table.setItem(row, 5, note_item)
 
         self.preview_count_label.setText(
             '预览显示: {} / {} (前50个)'.format(len(preview_words), total_count)
@@ -369,7 +413,7 @@ class ConfigEnhancedDialog(QDialog):
                 'times': ['已逾期', '今早', '今晚'],
                 'len_min': 1, 'len_max': 20,
                 'letters': list('ABCDEFGHIJKLMNOPQRSTUVWXYZ'),
-                'assoc_filter': '全部', 'record_filter': '全部',
+                'assoc_filter': '全部', 'notes_filter': '全部',
                 'count': 50, 'method': 'priority'
             },
             '全面复习': {
@@ -377,7 +421,7 @@ class ConfigEnhancedDialog(QDialog):
                 'times': ['已逾期', '今早', '今晚', '明早', '明晚', '后天'],
                 'len_min': 1, 'len_max': 20,
                 'letters': list('ABCDEFGHIJKLMNOPQRSTUVWXYZ'),
-                'assoc_filter': '全部', 'record_filter': '全部',
+                'assoc_filter': '全部', 'notes_filter': '全部',
                 'count': 100, 'method': 'proportion'
             },
             '新词学习': {
@@ -385,7 +429,7 @@ class ConfigEnhancedDialog(QDialog):
                 'times': [],
                 'len_min': 1, 'len_max': 20,
                 'letters': list('ABCDEFGHIJKLMNOPQRSTUVWXYZ'),
-                'assoc_filter': '全部', 'record_filter': '从未复习',
+                'assoc_filter': '全部', 'notes_filter': '无笔记',
                 'count': 30, 'method': 'priority'
             },
             '难点攻克': {
@@ -394,7 +438,7 @@ class ConfigEnhancedDialog(QDialog):
                           '第4天', '第7天', '第15天', '半个月后'],
                 'len_min': 1, 'len_max': 20,
                 'letters': list('ABCDEFGHIJKLMNOPQRSTUVWXYZ'),
-                'assoc_filter': '全部', 'record_filter': '全部',
+                'assoc_filter': '全部', 'notes_filter': '全部',
                 'count': 30, 'method': 'priority'
             }
         }
@@ -437,16 +481,23 @@ class ConfigEnhancedDialog(QDialog):
             self._set_selected_items(self.ranks_list, config.get('ranks', []))
             # 恢复时间选择
             self._set_selected_items(self.times_list, config.get('times', []))
-            # 恢复长度
-            self.len_min_spin.setValue(config.get('len_min', 1))
-            self.len_max_spin.setValue(config.get('len_max', 20))
+            # 恢复长度滑条
+            self.len_min_slider.setValue(config.get('len_min', 1))
+            self.len_max_slider.setValue(config.get('len_max', 20))
             # 恢复首字母
             selected_letters = set(config.get('letters', list('ABCDEFGHIJKLMNOPQRSTUVWXYZ')))
             for letter, cb in self.letter_checks.items():
                 cb.setChecked(letter in selected_letters)
             # 恢复过滤选项
             self.assoc_combo.setCurrentText(config.get('assoc_filter', '全部'))
-            self.record_combo.setCurrentText(config.get('record_filter', '全部'))
+            # 兼容旧预设：如果是record_filter则映射到notes_filter
+            if 'notes_filter' in config:
+                self.notes_combo.setCurrentText(config.get('notes_filter', '全部'))
+            elif 'record_filter' in config:
+                # 旧预设的record_filter映射：从未复习->无笔记，有复习记录->全部
+                old_val = config.get('record_filter', '全部')
+                mapping = {'从未复习': '无笔记', '有复习记录': '全部', '全部': '全部'}
+                self.notes_combo.setCurrentText(mapping.get(old_val, '全部'))
             # 恢复数量
             self.countSlider.setValue(config.get('count', 100))
             # 恢复提取方式
@@ -486,11 +537,11 @@ class ConfigEnhancedDialog(QDialog):
         return {
             'ranks': self._get_selected_ranks(),
             'times': self._get_selected_times(),
-            'len_min': self.len_min_spin.value(),
-            'len_max': self.len_max_spin.value(),
+            'len_min': self.len_min_slider.value(),
+            'len_max': self.len_max_slider.value(),
             'letters': self._get_selected_letters(),
             'assoc_filter': self.assoc_combo.currentText(),
-            'record_filter': self.record_combo.currentText(),
+            'notes_filter': self.notes_combo.currentText(),
             'count': self.countSlider.value(),
             'method': 'priority' if self.radioPriority.isChecked() else 'proportion'
         }
