@@ -15,6 +15,7 @@
 import os
 import json
 import string
+import logging
 
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
@@ -32,6 +33,8 @@ from SmartReview.Base import basepath
 PRESET_PATH = os.path.join(basepath, 'config_presets.json')
 
 PREVIEW_LIMIT = 50  # 右侧预览最多显示的单词数
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigPanel(QDialog):
@@ -419,12 +422,36 @@ class ConfigPanel(QDialog):
         filters = self._current_filters()
         matched = self._match_words(filters)
         count = filters['count']
-        # 直接用筛选好的、已按优先级排序的结果填充 reviewList
+
+        # 边界处理 1:清理"旧数据"。
+        # reviewList 里可能残留上一次配置留下、但本次已不符合筛选条件的单词,
+        # 这里重建一个只保留"仍匹配"的新队列,避免旧词混入本次复习。
+        matched_set = set(id(w) for w in matched)
+        stale = [w for w in self.book.reviewList if id(w) not in matched_set]
+        for w in stale:
+            self.book.reviewList.remove(w)  # 移除不再匹配的旧词
+
+        # 边界处理 2:去重来源。
+        # 一个单词若已经在待背队列 reviewList,或已在本轮"记住/模糊/忘记"的
+        # 进行中状态集里(masterySet / vagueSet / forgetList),都不应重复加入,
+        # 否则同一个词会被背两次、或与进行中的状态冲突。
+        existing = set()
+        existing.update(id(w) for w in self.book.reviewList)
+        for bucket in (self.book.masterySet, self.book.vagueSet, self.book.forgetList):
+            existing.update(id(w) for w in bucket)
+
+        # 按优先级顺序补足到目标数量(count 是"总的待背上限",已在队列中的也计入)
         added = 0
+        current_total = len(self.book.reviewList)
         for word_obj in matched:
-            if word_obj not in self.book.reviewList:
-                self.book.reviewList.append(word_obj)
-                added += 1
-                if added >= count:
-                    break
+            if current_total + added >= count:  # 已达到目标复习量则停止
+                break
+            if id(word_obj) in existing:  # 去重:跳过已存在或进行中的词
+                continue
+            self.book.reviewList.append(word_obj)
+            existing.add(id(word_obj))  # 同步登记,防止 matched 内部潜在重复
+            added += 1
+
+        logger.info('config accept: 清理旧词 %d, 新增 %d, 当前待背 %d',
+                    len(stale), added, len(self.book.reviewList))
         super(ConfigPanel, self).accept()

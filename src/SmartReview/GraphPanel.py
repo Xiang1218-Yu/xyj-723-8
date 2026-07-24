@@ -78,6 +78,38 @@ class NodeItem(QGraphicsEllipseItem):
         self._apply_color(dim)
         self.label.setOpacity(0.25 if dim else 1.0)
 
+    def set_detail(self, explain, associate_count, next_review):
+        """ 配置悬停提示(tooltip),展示该单词的详细信息。
+        QGraphicsItem 内置 setToolTip 会在鼠标悬停时自动弹出,无需额外事件。 """
+        # 释义可能很长,截断到 60 字符,避免 tooltip 过宽
+        brief = str(explain).replace('\n', ' ').strip()
+        if len(brief) > 60:
+            brief = brief[:60] + '…'
+        # 用富文本让 tooltip 分行显示,信息更清晰
+        self.setToolTip(
+            '<b>{word}</b><br/>'
+            '掌握度: {rank}<br/>'
+            '关联词数: {assoc}<br/>'
+            '下次复习: {review}<br/>'
+            '释义: {explain}'.format(
+                word=self.word, rank=self.rank,
+                assoc=associate_count, review=next_review, explain=brief))
+
+    def hoverEnterEvent(self, event):
+        """ 鼠标移入:轻微放大并加粗描边,给出可交互的视觉反馈 """
+        pen = self.pen()
+        pen.setWidthF(3.0)
+        self.setPen(pen)
+        self.setScale(1.2)  # 放大 20%
+        super(NodeItem, self).hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        """ 鼠标移出:恢复原始描边与大小 """
+        self.setScale(1.0)
+        # 依据当前是否处于淡化状态,重新应用正确的描边
+        self._apply_color(self.label.opacity() < 0.5)
+        super(NodeItem, self).hoverLeaveEvent(event)
+
     def itemChange(self, change, value):
         # 节点位置变化时,通知面板刷新与之相连的边
         if change == QGraphicsItem.ItemPositionHasChanged and self._view is not None:
@@ -126,29 +158,33 @@ class EdgeItem(QGraphicsPathItem):
         self.setPen(QPen(color, 2.4 if on else 1.6))
 
     def update_path(self, p1, p2):
-        """ 依据两端节点坐标,重新绘制这条带箭头的边 """
+        """ 依据两端节点坐标 p1(源)、p2(目标),重新绘制这条带箭头的有向边 """
         path = QPainterPath()
-        # 让线段止于目标节点圆周外侧,避免箭头戳进圆里
+        # 计算两节点圆心之间的距离
         line = QLineF(p1, p2)
         length = line.length()
-        if length < 1e-6:
+        if length < 1e-6:  # 两点几乎重合,画不出线,直接清空
             self.setPath(path)
             return
-        # 单位方向向量
+        # 源→目标 的单位方向向量 (ux, uy),用于把线段两端各缩进一个半径,
+        # 使线从源节点圆周出发、止于目标节点圆周外侧,箭头不会戳进圆里。
         ux = (p2.x() - p1.x()) / length
         uy = (p2.y() - p1.y()) / length
         start = QPointF(p1.x() + ux * NodeItem.RADIUS, p1.y() + uy * NodeItem.RADIUS)
         end = QPointF(p2.x() - ux * NodeItem.RADIUS, p2.y() - uy * NodeItem.RADIUS)
         path.moveTo(start)
         path.lineTo(end)
-        # 箭头(两条短边)
+        # ---- 在 end 处画箭头(一个三角形) ----
         arrow_size = 8.0
+        # angle 是线段的朝向角(相对 x 轴),atan2 能正确处理四个象限
         angle = math.atan2(end.y() - start.y(), end.x() - start.x())
+        # 从箭尖 end 沿"反方向 ± 30°"回退 arrow_size,得到箭头两翼端点。
+        # ±π/6 即 30°,决定箭头张开的角度。
         a1 = QPointF(end.x() - arrow_size * math.cos(angle - math.pi / 6),
                      end.y() - arrow_size * math.sin(angle - math.pi / 6))
         a2 = QPointF(end.x() - arrow_size * math.cos(angle + math.pi / 6),
                      end.y() - arrow_size * math.sin(angle + math.pi / 6))
-        arrow = QPolygonF([end, a1, a2])
+        arrow = QPolygonF([end, a1, a2])  # 箭尖 + 两翼构成三角形
         path.addPolygon(arrow)
         self.setPath(path)
 
@@ -208,8 +244,17 @@ class GraphView(QGraphicsView):
 
         # 创建节点,随机初始散布在一个圆内,给力导向一个起点
         for word in involved:
-            rank = book[word].rank if word in book.data else '待定'
+            # 目标关联词可能本身不在词库里(仅作为被指向的名字),此时信息用占位
+            word_obj = book.data.get(word)
+            rank = word_obj.rank if word_obj is not None else '待定'
             node = NodeItem(word, rank, self)
+            # 配置悬停提示的详细信息:释义 / 关联词数 / 下次复习时间
+            if word_obj is not None:
+                node.set_detail(word_obj.explain,
+                                len(word_obj.associate),
+                                word_obj.review.next_review_time)
+            else:
+                node.set_detail('(该词不在当前词库中)', 0, '未知')
             angle = random.uniform(0, 2 * math.pi)
             radius = random.uniform(0, 300)
             node.setPos(math.cos(angle) * radius, math.sin(angle) * radius)
@@ -236,7 +281,11 @@ class GraphView(QGraphicsView):
         self._timer.start(16)  # ~60fps
 
     def _step_layout(self):
-        """ 单步 Fruchterman-Reingold:斥力(全体)+ 引力(相连) """
+        """ 单步 Fruchterman-Reingold 力导向迭代。
+        算法把图看成物理系统:所有节点两两带同种电荷互相排斥(斥力),
+        有边相连的节点之间像弹簧一样互相吸引(引力)。反复迭代直到系统能量
+        趋于平衡,节点便自动散开成美观、少交叉的布局。 """
+        # 迭代次数用尽 / 无节点时,停止定时器并把视图缩放到能看全
         if self._iterations_left <= 0 or not self.nodes:
             self._timer.stop()
             self.fit_all()
@@ -244,40 +293,50 @@ class GraphView(QGraphicsView):
 
         nodes = list(self.nodes.values())
         area = 900.0 * 900.0
-        k = math.sqrt(area / max(len(nodes), 1))  # 理想边长
-        # 计算斥力
+        # k 是"理想边长":画布面积均摊到每个节点后的边长尺度,
+        # 斥力与引力都以它为基准,保证节点疏密适中。
+        k = math.sqrt(area / max(len(nodes), 1))
+
+        # 每轮开始先把每个节点的合力位移向量 (vx, vy) 清零
         for a in nodes:
             a.vx = 0.0
             a.vy = 0.0
+
+        # ---- 斥力:任意两个节点互相推开(O(n^2) 两两遍历) ----
         for i, a in enumerate(nodes):
-            for b in nodes[i + 1:]:
+            for b in nodes[i + 1:]:  # 只遍历上三角,避免重复计算同一对
                 dx = a.x() - b.x()
                 dy = a.y() - b.y()
-                dist = math.hypot(dx, dy) or 0.01
-                force = (k * k) / dist       # 斥力与距离成反比
+                dist = math.hypot(dx, dy) or 0.01  # 防止两点重合导致除零
+                force = (k * k) / dist       # 斥力大小 ∝ k²/距离:越近推得越猛
+                # (dx/dist, dy/dist) 是 b→a 的单位方向向量,乘力得到分量
                 fx = dx / dist * force
                 fy = dy / dist * force
-                a.vx += fx; a.vy += fy
-                b.vx -= fx; b.vy -= fy
-        # 计算引力(仅相连节点)
+                a.vx += fx; a.vy += fy       # a 被推离 b
+                b.vx -= fx; b.vy -= fy       # b 受反方向等大的力(牛顿第三定律)
+
+        # ---- 引力:仅相连节点互相拉近(遍历边) ----
         for edge in self.edges:
             a = self.nodes[edge.source_word]
             b = self.nodes[edge.target_word]
             dx = a.x() - b.x()
             dy = a.y() - b.y()
             dist = math.hypot(dx, dy) or 0.01
-            force = (dist * dist) / k        # 引力与距离平方成正比
+            force = (dist * dist) / k        # 引力大小 ∝ 距离²/k:越远拉得越紧
             fx = dx / dist * force
             fy = dy / dist * force
-            a.vx -= fx; a.vy -= fy
-            b.vx += fx; b.vy += fy
+            a.vx -= fx; a.vy -= fy           # a 被拉向 b
+            b.vx += fx; b.vy += fy           # b 被拉向 a
 
-        # 应用位移(限幅,避免抖动)并逐步降温
+        # ---- 应用位移:限幅 + 降温 ----
+        # temp(温度)限制单步最大移动距离,随迭代推进节点越动越小,
+        # 从而逐渐收敛、避免来回抖动。
         temp = 8.0
         for n in nodes:
-            disp = math.hypot(n.vx, n.vy) or 0.01
-            limited = min(disp, temp)
-            # setPos 会触发 itemChange 从而刷新边
+            disp = math.hypot(n.vx, n.vy) or 0.01  # 合力位移的模长
+            limited = min(disp, temp)              # 本步实际移动不超过 temp
+            # 把合力方向 (vx/disp, vy/disp) 归一化后乘以限幅距离,再更新坐标。
+            # setPos 会触发 NodeItem.itemChange,从而自动刷新相连的边。
             n.setPos(n.x() + n.vx / disp * limited,
                      n.y() + n.vy / disp * limited)
 

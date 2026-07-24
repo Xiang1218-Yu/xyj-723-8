@@ -311,18 +311,52 @@ class ReportWindow(QWidget):
             QMessageBox.warning(self, '导出失败', str(e))
 
     def export_png(self):
-        """ 导出当前 Tab 的图表为 PNG(详情表 Tab 不支持) """
-        canvas_map = {0: self.ringCanvas, 2: self.trendCanvas, 3: self.distCanvas}
-        canvas = canvas_map.get(self.tabs.currentIndex())
-        if canvas is None:
-            QMessageBox.information(self, '提示', '详情表不支持导出为图片,请切换到图表页。')
-            return
+        """ 导出当前 Tab 为 PNG。
+        图表 Tab 直接保存对应画布;详情表 Tab 则把表格数据渲染成一张表格图片。 """
+        idx = self.tabs.currentIndex()
         path, _ = QFileDialog.getSaveFileName(self, '导出 PNG', 'chart.png',
                                               'PNG Files (*.png)')
         if not path:
             return
         try:
-            canvas.fig.savefig(path, dpi=150)
+            if idx == 1:
+                # 详情表 Tab:用 matplotlib 把表格数据绘制成表格图片
+                self._export_table_png(path)
+            else:
+                # 其余三个 Tab 都是 matplotlib 画布,直接保存
+                canvas_map = {0: self.ringCanvas, 2: self.trendCanvas, 3: self.distCanvas}
+                canvas_map[idx].fig.savefig(path, dpi=150)
             QMessageBox.information(self, '导出成功', '已保存到:\n{}'.format(path))
         except OSError as e:
             QMessageBox.warning(self, '导出失败', str(e))
+
+    def _export_table_png(self, path):
+        """ 将详情表渲染为表格图片并保存到 path """
+        headers = ['单词', '掌握度', '复习次数', '正确率(%)', '平均思考(s)', '下次复习']
+        # 按掌握度优先级排序,与界面表格保持一致
+        order = {r: i for i, r in enumerate(Palette.ordered_ranks())}
+        rows = sorted(self._detail_rows,
+                      key=lambda x: order.get(x[1], 99), reverse=True)
+        # 数据太多时全画会非常高,这里限制最多 60 行,避免图片过大
+        limited = rows[:60]
+
+        # 行高约 0.3 英寸,再留出表头与标题空间
+        fig = Figure(figsize=(9, max(2, len(limited) * 0.3 + 1)), tight_layout=True)
+        ax = fig.add_subplot(111)
+        ax.axis('off')  # 不显示坐标轴,只放表格
+        if limited:
+            cell_text = [[str(c) for c in row] for row in limited]
+            table = ax.table(cellText=cell_text, colLabels=headers,
+                             cellLoc='center', loc='center')
+            table.auto_set_font_size(False)
+            table.set_fontsize(9)
+            table.scale(1, 1.4)
+            # 给"掌握度"列的文字上色,直观区分
+            for r, row in enumerate(limited):
+                cell = table[r + 1, 1]  # +1 跳过表头行
+                cell.get_text().set_color(Palette.color_of(row[1]))
+        title = '单词详情表'
+        if len(rows) > len(limited):
+            title += '(仅显示前 {} / 共 {} 条)'.format(len(limited), len(rows))
+        ax.set_title(title)
+        fig.savefig(path, dpi=150)
