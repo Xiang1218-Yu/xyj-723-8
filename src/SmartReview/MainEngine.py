@@ -17,6 +17,10 @@ import json
 import time
 import logging
 from SmartReview.Tools import pysay
+# 迭代新增的三大面板:增强配置 / 关联有向图 / 统计报告
+from SmartReview.ConfigPanel import ConfigPanel
+from SmartReview.GraphPanel import GraphPanel
+from SmartReview.ReportWindow import ReportWindow
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -173,9 +177,12 @@ class MainWindow(QMainWindow, UIBase.Ui_MainWindow):
     def __init__(self, *args, **kwargs):
         super(MainWindow, self).__init__(*args, **kwargs)
         self.setupUi(self)  # 安装 UI
-        self.configDialog = ConfigDialog()
+        self.configDialog = ConfigPanel()  # 使用增强版配置面板
         self.book = self.configDialog.book
         self.searchDialog = SearchDialog.LoadFrom(self.configDialog.book, self)
+        # 迭代新增:关联有向图面板 与 统计报告窗口(懒复用同一实例)
+        self.graphPanel = GraphPanel(self.book, self)
+        self.reportWindow = ReportWindow(self.book)
         self.word = None  # 单词本身
         self.completed = False  # 背单词机器的标识, True 代表背词结束
         self.timeStart = None  # 按下去的时间戳
@@ -184,7 +191,8 @@ class MainWindow(QMainWindow, UIBase.Ui_MainWindow):
         self.word_explain.hide()  # 刚开始不显示 word_explain
         self.word_status.hide()  # 刚开始不显示 word_status
         self.install_signals_and_slots()  # 安装信号槽机制
-        
+        self._install_extra_buttons()  # 安装迭代新增的入口按钮
+
         if len(self.book) > 0 and len(self.book.reviewList) == 0:
             self.book.select(count=100)
 
@@ -193,6 +201,30 @@ class MainWindow(QMainWindow, UIBase.Ui_MainWindow):
         self.word_status.toggled[bool].connect(self.switchStatus)  # 记住与忘记的状态转换
         self.configButton.clicked[bool].connect(self.configDialog.show)  # 显示配置界面
         self.associationButton.clicked[bool].connect(self.searchDialog.show)  # 配置添加关联词
+
+    def _install_extra_buttons(self):
+        """ 迭代新增:在主界面上添加"关联图"与"统计报告"入口按钮 """
+        from PyQt5.QtWidgets import QPushButton
+        # 关联有向图按钮
+        self.graphButton = QPushButton('关联图', self.centralwidget)
+        self.graphButton.setGeometry(490, 460, 113, 32)
+        self.graphButton.clicked.connect(self.showGraphPanel)
+        self.graphButton.show()
+        # 统计报告按钮
+        self.reportButton = QPushButton('统计报告', self.centralwidget)
+        self.reportButton.setGeometry(620, 460, 113, 32)
+        self.reportButton.clicked.connect(self.showReportWindow)
+        self.reportButton.show()
+
+    @pyqtSlot()
+    def showGraphPanel(self):
+        """ 打开全局关联有向图 """
+        self.graphPanel.show()
+
+    @pyqtSlot()
+    def showReportWindow(self):
+        """ 打开统计报告窗口 """
+        self.reportWindow.show()
 
     @pyqtSlot(bool)
     def muteEvent(self, turn_on):
@@ -298,6 +330,8 @@ class MainWindow(QMainWindow, UIBase.Ui_MainWindow):
             self.configDialog.book.save()
             self.say('已保存!')
             self.word_before.setText('已保存')
+            # 迭代升级:保存后直接弹出独立统计报告窗口,取代原先简陋的文字统计
+            self.showReportWindow()
 
     # def mousePressEvent(self, QMouseEvent):
     #     """ 鼠标按下事件 """
