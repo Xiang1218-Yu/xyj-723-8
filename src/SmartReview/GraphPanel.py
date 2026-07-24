@@ -28,25 +28,23 @@ RANK_COLORS = {
     '待定': QColor(149, 165, 166),   # 灰色 - 未定义
 }
 
+# 力导向模拟的节点数阈值：超过此数量使用网格布局而非物理模拟
+MAX_FORCE_NODES = 150
+
 
 class WordNode(QGraphicsEllipseItem):
     """单词节点类 - 在力导向图中表示一个单词"""
 
     def __init__(self, word_obj, radius=20, parent=None):
-        """
-        初始化单词节点
-        :param word_obj: Vocabulary对象
-        :param radius: 节点半径
-        """
         super().__init__(-radius, -radius, radius * 2, radius * 2, parent)
         self.word_obj = word_obj
         self.word_text = word_obj.value
         self.radius = radius
 
         # 力导向模拟相关属性
-        self.vel = QPointF(0, 0)       # 速度
-        self.pos = QPointF(0, 0)       # 当前位置
-        self.force = QPointF(0, 0)     # 合力
+        self.vel = QPointF(0, 0)
+        self.pos = QPointF(0, 0)
+        self.force = QPointF(0, 0)
 
         # 设置节点外观
         self.setAcceptHoverEvents(True)
@@ -61,38 +59,31 @@ class WordNode(QGraphicsEllipseItem):
         self.label.setDefaultTextColor(QColor(30, 30, 30))
         font = QFont("Arial", 8)
         self.label.setFont(font)
-        # 将文本居中放置在节点下方
         text_rect = self.label.boundingRect()
         self.label.setPos(-text_rect.width() / 2, radius + 2)
         self.label.setZValue(11)
 
         # 高亮状态
         self.highlighted = False
-        self.neighbors = set()  # 邻居节点集合
+        self.neighbors = set()
 
     def _get_color(self):
-        """根据单词掌握度获取颜色"""
         rank = self.word_obj.rank
         return RANK_COLORS.get(rank, RANK_COLORS['待定'])
 
     def update_color(self):
-        """更新节点颜色（当掌握度变化时调用）"""
         self.setBrush(QBrush(self._get_color()))
 
     def get_rank(self):
-        """获取当前掌握度"""
         return self.word_obj.rank
 
     def set_highlight(self, highlight, is_neighbor=False):
-        """设置节点高亮状态"""
         self.highlighted = highlight
         if highlight:
             if is_neighbor:
-                # 邻居节点：青绿色边框加粗
                 self.setPen(QPen(QColor(26, 188, 156), 4))
                 self.setScale(1.15)
             else:
-                # 当前选中节点：金黄色边框加粗
                 self.setPen(QPen(QColor(241, 196, 15), 5))
                 self.setScale(1.3)
             self.setZValue(20)
@@ -102,16 +93,10 @@ class WordNode(QGraphicsEllipseItem):
             self.setZValue(10)
 
     def apply_force(self, force_x, force_y):
-        """施加力到节点"""
         self.force += QPointF(force_x, force_y)
 
     def step(self, damping=0.85, max_speed=15.0):
-        """力导向模拟一步更新
-        :param damping: 阻尼系数 (0-1)
-        :param max_speed: 最大速度限制
-        """
         self.vel = (self.vel + self.force) * damping
-        # 限制最大速度
         speed = math.hypot(self.vel.x(), self.vel.y())
         if speed > max_speed:
             self.vel *= max_speed / speed
@@ -124,11 +109,6 @@ class EdgeLine(QGraphicsLineItem):
     """边/关联线类 - 表示两个单词之间的关联关系"""
 
     def __init__(self, source_node, target_node, parent=None):
-        """
-        初始化边
-        :param source_node: 起始节点
-        :param target_node: 目标节点
-        """
         super().__init__(parent)
         self.source = source_node
         self.target = target_node
@@ -138,7 +118,6 @@ class EdgeLine(QGraphicsLineItem):
         self._update_position()
 
     def _update_position(self):
-        """更新边的位置（跟随节点移动）"""
         if self.source and self.target:
             self.setLine(
                 self.source.pos().x(), self.source.pos().y(),
@@ -146,7 +125,6 @@ class EdgeLine(QGraphicsLineItem):
             )
 
     def set_highlight(self, highlight):
-        """设置边高亮状态"""
         self.highlighted = highlight
         if highlight:
             self.setPen(QPen(QColor(52, 152, 219), 3))
@@ -160,44 +138,75 @@ class ForceDirectedScene(QGraphicsScene):
     """力导向图场景 - 管理节点和边的物理模拟"""
 
     # 力导向参数
-    REPULSION = 8000       # 斥力常数
-    ATTRACTION = 0.01      # 引力常数（弹簧）
-    DAMPING = 0.85         # 阻尼系数
-    MAX_SPEED = 12.0       # 最大速度
-    CENTER_GRAVITY = 0.005 # 中心引力
-    IDEAL_DISTANCE = 150   # 理想弹簧长度
-    SIMULATION_STEPS = 3   # 每次定时器触发的模拟步数
+    REPULSION = 5000
+    ATTRACTION = 0.008
+    DAMPING = 0.85
+    MAX_SPEED = 10.0
+    CENTER_GRAVITY = 0.003
+    IDEAL_DISTANCE = 120
+    SIMULATION_STEPS = 2
+    MAX_SIM_ITERATIONS = 200  # 最大模拟迭代次数，防止无限运行
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.nodes = {}       # word_text -> WordNode
-        self.edges = []       # EdgeLine列表
+        self.nodes = {}
+        self.edges = []
         self.timer = QTimer()
         self.timer.timeout.connect(self._simulate_step)
         self.is_simulating = False
-        self.temperature = 1.0  # 模拟温度（随时间降低）
+        self.temperature = 1.0
+        self.iteration_count = 0
+
+    def _grid_layout(self, words):
+        """网格布局 - 用于大量节点时的快速布局
+        :param words: Vocabulary对象列表
+        :return: word_text -> QPointF 位置映射
+        """
+        n = len(words)
+        # 计算合适的列数（大致正方形）
+        cols = int(math.ceil(math.sqrt(n)))
+        spacing = 55  # 节点间距
+        positions = {}
+        for i, word_obj in enumerate(words):
+            row = i // cols
+            col = i % cols
+            x = (col - cols / 2) * spacing
+            y = (row - (n / cols) / 2) * spacing
+            positions[word_obj.value] = QPointF(x, y)
+        return positions
 
     def build_graph(self, dictionary):
         """从Dictionary对象构建图
         :param dictionary: Dictionary对象（词库）
         """
+        self.stop_simulation()
         self.clear_all()
 
         words = list(dictionary.values())
         if not words:
             return
 
+        n_nodes = len(words)
+        use_force = n_nodes <= MAX_FORCE_NODES
+
+        # 决定初始位置：小图用力导向随机布局，大图用网格布局
+        if use_force:
+            positions = {}
+            center = QPointF(0, 0)
+            for word_obj in words:
+                angle = random.uniform(0, 2 * math.pi)
+                dist = random.uniform(50, 200)
+                positions[word_obj.value] = QPointF(
+                    center.x() + math.cos(angle) * dist,
+                    center.y() + math.sin(angle) * dist
+                )
+        else:
+            positions = self._grid_layout(words)
+
         # 创建节点
-        center = QPointF(0, 0)
         for word_obj in words:
             node = WordNode(word_obj)
-            # 随机初始位置
-            angle = random.uniform(0, 2 * math.pi)
-            dist = random.uniform(50, 300)
-            node.pos = QPointF(
-                center.x() + math.cos(angle) * dist,
-                center.y() + math.sin(angle) * dist
-            )
+            node.pos = positions.get(word_obj.value, QPointF(0, 0))
             node.setPos(node.pos)
             self.addItem(node)
             self.nodes[word_obj.value] = node
@@ -209,55 +218,71 @@ class ForceDirectedScene(QGraphicsScene):
                 continue
             for assoc_text in word_obj.associate:
                 target_node = self.nodes.get(assoc_text)
-                if target_node and assoc_text > word_obj.value:  # 避免重复边
+                if target_node and assoc_text > word_obj.value:
                     edge = EdgeLine(source_node, target_node)
                     self.addItem(edge)
                     self.edges.append(edge)
                     source_node.neighbors.add(target_node)
                     target_node.neighbors.add(source_node)
 
-        self.setSceneRect(-500, -500, 1000, 1000)
-        self.start_simulation()
+        # 设置场景大小
+        if self.nodes:
+            all_positions = [n.pos for n in self.nodes.values()]
+            min_x = min(p.x() for p in all_positions) - 80
+            max_x = max(p.x() for p in all_positions) + 80
+            min_y = min(p.y() for p in all_positions) - 80
+            max_y = max(p.y() for p in all_positions) + 80
+            self.setSceneRect(min_x, min_y, max_x - min_x, max_y - min_y)
+        else:
+            self.setSceneRect(-500, -500, 1000, 1000)
+
+        # 小图启用力导向模拟
+        if use_force:
+            self.start_simulation()
 
     def clear_all(self):
-        """清空场景"""
         self.nodes.clear()
         self.edges.clear()
         self.clear()
 
     def start_simulation(self):
-        """启动力导向模拟"""
+        """启动力导向模拟（有限迭代次数）"""
         self.temperature = 1.0
+        self.iteration_count = 0
         self.is_simulating = True
-        self.timer.start(30)  # 约33fps
+        self.timer.start(25)
 
     def stop_simulation(self):
-        """停止力导向模拟"""
         self.is_simulating = False
         self.timer.stop()
 
     def _simulate_step(self):
-        """执行一步物理模拟"""
+        """执行一步物理模拟（带迭代计数上限保护）"""
         if not self.is_simulating:
             return
 
         for _ in range(self.SIMULATION_STEPS):
-            self.temperature *= 0.995  # 退火降温
-            if self.temperature < 0.05:
+            self.iteration_count += 1
+            self.temperature *= 0.992
+
+            # 停止条件：温度过低或达到最大迭代次数
+            if self.temperature < 0.03 or self.iteration_count > self.MAX_SIM_ITERATIONS:
                 self.stop_simulation()
                 break
 
             node_list = list(self.nodes.values())
 
-            # 计算斥力（节点之间）
+            # 计算斥力（节点之间） - O(n²)，仅用于小规模图
             for i, n1 in enumerate(node_list):
                 for n2 in node_list[i + 1:]:
                     delta = n1.pos - n2.pos
                     dist_sq = delta.x() ** 2 + delta.y() ** 2
                     if dist_sq < 1:
                         dist_sq = 1
+                    # 超过一定距离的节点斥力忽略不计，减少计算
+                    if dist_sq > 50000:
+                        continue
                     dist = math.sqrt(dist_sq)
-                    # 斥力与距离平方成反比
                     force = self.REPULSION / dist_sq * self.temperature
                     fx = delta.x() / dist * force
                     fy = delta.y() / dist * force
@@ -270,7 +295,6 @@ class ForceDirectedScene(QGraphicsScene):
                 dist = math.sqrt(delta.x() ** 2 + delta.y() ** 2)
                 if dist < 1:
                     dist = 1
-                # 胡克定律
                 force = (dist - self.IDEAL_DISTANCE) * self.ATTRACTION * self.temperature
                 fx = delta.x() / dist * force
                 fy = delta.y() / dist * force
@@ -293,10 +317,7 @@ class ForceDirectedScene(QGraphicsScene):
                 edge._update_position()
 
     def highlight_neighbors(self, selected_node):
-        """高亮选中节点及其邻居
-        :param selected_node: 选中的WordNode，None则取消所有高亮
-        """
-        # 先重置所有高亮
+        """高亮选中节点及其邻居"""
         for node in self.nodes.values():
             node.set_highlight(False)
         for edge in self.edges:
@@ -305,10 +326,7 @@ class ForceDirectedScene(QGraphicsScene):
         if selected_node is None:
             return
 
-        # 高亮选中节点
         selected_node.set_highlight(True)
-
-        # 高亮邻居节点和连接边
         for edge in self.edges:
             if edge.source == selected_node:
                 edge.target.set_highlight(True, is_neighbor=True)
@@ -318,9 +336,7 @@ class ForceDirectedScene(QGraphicsScene):
                 edge.set_highlight(True)
 
     def filter_by_text(self, filter_text):
-        """根据搜索文本过滤节点
-        :param filter_text: 搜索关键词，空字符串则显示全部
-        """
+        """根据搜索文本过滤节点"""
         filter_text = filter_text.strip().lower()
         for text, node in self.nodes.items():
             if not filter_text or filter_text in text.lower():
@@ -329,55 +345,52 @@ class ForceDirectedScene(QGraphicsScene):
             else:
                 node.setVisible(False)
                 node.label.setVisible(False)
-        # 显示/隐藏边
         for edge in self.edges:
-            if edge.source.isVisible() and edge.target.isVisible():
-                edge.setVisible(True)
-            else:
-                edge.setVisible(False)
+            edge.setVisible(edge.source.isVisible() and edge.target.isVisible())
 
 
 class GraphView(QGraphicsView):
     """力导向图视图 - 支持缩放平移和交互"""
 
-    word_double_clicked = pyqtSignal(str)  # 单词双击信号，传递单词文本
-    association_removed = pyqtSignal(str, str)  # 关联删除信号，传递两个单词
+    word_double_clicked = pyqtSignal(str)
+    association_removed = pyqtSignal(str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.scene = ForceDirectedScene()
         self.setScene(self.scene)
 
-        # 视图设置
         self.setRenderHint(QPainter.Antialiasing)
         self.setRenderHint(QPainter.SmoothPixmapTransform)
-        self.setDragMode(QGraphicsView.ScrollHandDrag)  # 拖拽平移
+        self.setDragMode(QGraphicsView.ScrollHandDrag)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
         self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
         self.setBackgroundBrush(QBrush(QColor(250, 250, 250)))
 
-        # 选中节点
         self.selected_node = None
+        self._pending_fit = False
 
-        # 右键菜单
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
 
     def load_dictionary(self, dictionary):
-        """加载词库并构建图
-        :param dictionary: Dictionary对象
-        """
+        """加载词库并构建图（fitInView延迟到show后执行）"""
         self.scene.build_graph(dictionary)
-        self.fitInView(self.scene.itemsBoundingRect(), Qt.KeepAspectRatio)
+        self._pending_fit = True
+
+    def showEvent(self, event):
+        """视图显示后执行fitInView，避免构造时尺寸为0的问题"""
+        super().showEvent(event)
+        if self._pending_fit and self.scene.itemsBoundingRect().isValid():
+            self.fitInView(self.scene.itemsBoundingRect().adjusted(-20, -20, 20, 20), Qt.KeepAspectRatio)
+            self._pending_fit = False
 
     def refresh_colors(self):
-        """刷新所有节点颜色（掌握度变化时调用）"""
         for node in self.scene.nodes.values():
             node.update_color()
 
     def wheelEvent(self, event):
-        """鼠标滚轮缩放"""
         zoom_factor = 1.15
         if event.angleDelta().y() > 0:
             self.scale(zoom_factor, zoom_factor)
@@ -385,11 +398,8 @@ class GraphView(QGraphicsView):
             self.scale(1 / zoom_factor, 1 / zoom_factor)
 
     def mousePressEvent(self, event):
-        """鼠标点击事件"""
         if event.button() == Qt.LeftButton:
-            # 查找点击的节点
             item = self.itemAt(event.pos())
-            # 如果点击的是文本标签，获取其父节点
             if isinstance(item, QGraphicsTextItem) and item.parentItem():
                 item = item.parentItem()
             if isinstance(item, WordNode):
@@ -401,18 +411,15 @@ class GraphView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
-        """鼠标双击事件 - 跳转到单词"""
         if event.button() == Qt.LeftButton:
             item = self.itemAt(event.pos())
             if isinstance(item, QGraphicsTextItem) and item.parentItem():
                 item = item.parentItem()
             if isinstance(item, WordNode):
                 self.word_double_clicked.emit(item.word_text)
-                logger.info('双击跳转到单词: {}'.format(item.word_text))
         super().mouseDoubleClickEvent(event)
 
     def _show_context_menu(self, pos):
-        """显示右键菜单"""
         item = self.itemAt(pos)
         if isinstance(item, QGraphicsTextItem) and item.parentItem():
             item = item.parentItem()
@@ -421,7 +428,6 @@ class GraphView(QGraphicsView):
 
         menu = QMenu(self)
 
-        # 如果有选中的其他节点，提供删除关联选项
         if self.selected_node and self.selected_node != item:
             action_remove = menu.addAction(
                 '删除关联: {} <-> {}'.format(self.selected_node.word_text, item.word_text)
@@ -437,10 +443,6 @@ class GraphView(QGraphicsView):
         menu.exec_(self.mapToGlobal(pos))
 
     def _remove_association(self, node_a, node_b):
-        """删除两个单词之间的关联
-        :param node_a: WordNode A
-        :param node_b: WordNode B
-        """
         word_a = node_a.word_text
         word_b = node_b.word_text
         reply = QMessageBox.question(
@@ -449,16 +451,13 @@ class GraphView(QGraphicsView):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            # 从两个单词的associate集合中互相移除（使用discard避免KeyError）
             node_a.word_obj.associate.discard(word_b)
             node_b.word_obj.associate.discard(word_a)
-            # 移除边
             for edge in self.scene.edges[:]:
                 if (edge.source == node_a and edge.target == node_b) or \
                    (edge.source == node_b and edge.target == node_a):
                     self.scene.removeItem(edge)
                     self.scene.edges.remove(edge)
-            # 更新邻居集合
             node_a.neighbors.discard(node_b)
             node_b.neighbors.discard(node_a)
             self.scene.highlight_neighbors(None)
@@ -467,26 +466,22 @@ class GraphView(QGraphicsView):
             logger.info('已删除关联: {} <-> {}'.format(word_a, word_b))
 
     def filter_nodes(self, text):
-        """过滤节点（供搜索框调用）"""
         self.scene.filter_by_text(text)
 
     def reset_view(self):
-        """重置视图到初始位置和缩放"""
         self.resetTransform()
-        self.fitInView(self.scene.itemsBoundingRect(), Qt.KeepAspectRatio)
+        rect = self.scene.itemsBoundingRect()
+        if rect.isValid():
+            self.fitInView(rect.adjusted(-20, -20, 20, 20), Qt.KeepAspectRatio)
 
 
 class GraphPanelDialog(QDialog):
     """全局有向图面板对话框"""
 
-    word_jump_requested = pyqtSignal(str)  # 请求跳转到指定单词
-    graph_modified = pyqtSignal()          # 图被修改（删除关联等）
+    word_jump_requested = pyqtSignal(str)
+    graph_modified = pyqtSignal()
 
     def __init__(self, dictionary, parent=None):
-        """
-        初始化图面板对话框
-        :param dictionary: Dictionary对象（词库）
-        """
         super().__init__(parent)
         self.dictionary = dictionary
         self.setWindowTitle('单词关联图谱 - 全局有向图')
@@ -494,21 +489,18 @@ class GraphPanelDialog(QDialog):
         self._setup_ui()
 
     def _setup_ui(self):
-        """设置UI布局"""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
         # 顶部工具栏
         toolbar = QHBoxLayout()
 
-        # 搜索框
         toolbar.addWidget(QLabel('搜索:'))
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText('输入单词关键词搜索...')
         self.search_edit.textChanged.connect(self._on_search_changed)
         toolbar.addWidget(self.search_edit)
 
-        # 掌握度筛选
         toolbar.addWidget(QLabel('掌握度:'))
         self.rank_combo = QComboBox()
         self.rank_combo.addItem('全部')
@@ -517,25 +509,32 @@ class GraphPanelDialog(QDialog):
         self.rank_combo.currentTextChanged.connect(self._on_rank_filter_changed)
         toolbar.addWidget(self.rank_combo)
 
-        # 重置视图按钮
         self.reset_btn = QPushButton('重置视图')
         self.reset_btn.clicked.connect(self._reset_view)
         toolbar.addWidget(self.reset_btn)
 
-        # 重新布局按钮
         self.relayout_btn = QPushButton('重新布局')
         self.relayout_btn.clicked.connect(self._relayout)
         toolbar.addWidget(self.relayout_btn)
 
         layout.addLayout(toolbar)
 
-        # 图视图
+        # 节点计数提示
+        n_words = len(self.dictionary)
+        if n_words > MAX_FORCE_NODES:
+            info_label = QLabel(
+                '💡 当前 {} 个单词，已使用网格布局（节点数 >{} 时自动切换，可点击"重新布局"尝试力导向）'.format(
+                    n_words, MAX_FORCE_NODES)
+            )
+            info_label.setStyleSheet('color: #666; font-size: 11px;')
+            layout.addWidget(info_label)
+
         self.graph_view = GraphView()
         self.graph_view.word_double_clicked.connect(self._on_word_jump)
         self.graph_view.association_removed.connect(self._on_assoc_removed)
         layout.addWidget(self.graph_view)
 
-        # 底部图例和提示
+        # 底部图例
         legend_layout = QHBoxLayout()
         legend_layout.addWidget(QLabel('掌握度图例:'))
         for rank_name, color in RANK_COLORS.items():
@@ -546,25 +545,20 @@ class GraphPanelDialog(QDialog):
             legend_layout.addWidget(QLabel(rank_name))
         legend_layout.addStretch()
 
-        hint_label = QLabel('提示: 单击高亮邻居 | 双击跳转单词 | 右键删除关联 | 滚轮缩放 | 拖拽平移')
+        hint_label = QLabel('提示: 单击高亮邻居 | 双击跳转 | 右键删关联 | 滚轮缩放 | 拖拽平移')
         hint_label.setStyleSheet('color: gray;')
         legend_layout.addWidget(hint_label)
         layout.addLayout(legend_layout)
 
-        # 加载图
         self.graph_view.load_dictionary(self.dictionary)
 
     def _on_search_changed(self, text):
-        """搜索文本变化"""
         self.graph_view.filter_nodes(text)
-        # 额外按掌握度筛选
         self._on_rank_filter_changed(self.rank_combo.currentText())
 
     def _on_rank_filter_changed(self, rank_text):
-        """掌握度筛选变化"""
         for node in self.graph_view.scene.nodes.values():
             if rank_text == '全部' or node.get_rank() == rank_text:
-                # 检查搜索文本过滤
                 search_text = self.search_edit.text().strip().lower()
                 if not search_text or search_text in node.word_text.lower():
                     node.setVisible(True)
@@ -575,31 +569,42 @@ class GraphPanelDialog(QDialog):
             else:
                 node.setVisible(False)
                 node.label.setVisible(False)
-        # 更新边的可见性
         for edge in self.graph_view.scene.edges:
             edge.setVisible(edge.source.isVisible() and edge.target.isVisible())
 
     def _reset_view(self):
-        """重置视图"""
         self.search_edit.clear()
         self.rank_combo.setCurrentIndex(0)
         self.graph_view.reset_view()
         self.graph_view.filter_nodes('')
 
     def _relayout(self):
-        """重新布局（重新启动力导向模拟）"""
+        """重新布局 - 强制运行力导向模拟（无论节点数）"""
         self.graph_view.refresh_colors()
-        self.graph_view.scene.start_simulation()
+        # 重新构建图以力导向方式布局（临时降低阈值）
+        self.graph_view.scene.stop_simulation()
+        words = list(self.dictionary.values())
+        if words:
+            # 随机打乱位置后启动模拟
+            import random as _r
+            center = QPointF(0, 0)
+            for node in self.graph_view.scene.nodes.values():
+                angle = _r.uniform(0, 2 * math.pi)
+                dist = _r.uniform(50, 250)
+                node.pos = QPointF(
+                    center.x() + math.cos(angle) * dist,
+                    center.y() + math.sin(angle) * dist
+                )
+                node.setPos(node.pos)
+                node.vel = QPointF(0, 0)
+            self.graph_view.scene.start_simulation()
 
     def _on_word_jump(self, word_text):
-        """单词双击跳转"""
         self.word_jump_requested.emit(word_text)
-        self.accept()  # 关闭对话框
+        self.accept()
 
     def _on_assoc_removed(self, word_a, word_b):
-        """关联被删除"""
         self.graph_modified.emit()
 
     def refresh(self):
-        """刷新图（词库变化后调用）"""
         self.graph_view.load_dictionary(self.dictionary)

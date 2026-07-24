@@ -7,8 +7,8 @@ import logging
 from datetime import datetime, timedelta
 from collections import Counter, defaultdict
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont
+from PyQt5.QtCore import Qt, QPoint
+from PyQt5.QtGui import QFont, QPixmap, QPainter, QRegion
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget, QPushButton,
     QLabel, QTableWidget, QTableWidgetItem, QHeaderView, QFileDialog,
@@ -205,6 +205,42 @@ class DetailTableTab(QWidget):
         """刷新数据"""
         self.dictionary = dictionary
         self._populate_table()
+
+    def save_as_png(self, filepath):
+        """将详情表导出为PNG图片（包含全部行，非仅可见区域）"""
+        row_count = self.table.rowCount()
+        col_count = self.table.columnCount()
+        if row_count == 0:
+            return
+
+        # 获取行高和列宽
+        row_height = self.table.rowHeight(0) if row_count > 0 else 30
+        header_height = self.table.horizontalHeader().height()
+        total_width = self.table.verticalHeader().width() + 40
+        for col in range(col_count):
+            total_width += self.table.columnWidth(col)
+
+        # 限制最大行数避免生成过大图片
+        max_rows = min(row_count, 500)
+        render_height = header_height + max_rows * row_height + 2
+
+        # 创建pixmap（上方留50px给统计标签）
+        pixmap = QPixmap(total_width, render_height + 50)
+        pixmap.fill(Qt.white)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # 渲染统计标签到顶部
+        self.stats_label.render(painter, targetOffset=QPoint(10, 5))
+
+        # 渲染表格（下移40px给标签留出空间）
+        painter.translate(0, 40)
+        self.table.render(painter, QRegion(0, 0, total_width, render_height))
+        painter.end()
+
+        pixmap.save(filepath, 'PNG')
+        if row_count > max_rows:
+            logger.info('表格有{}行，仅导出前{}行'.format(row_count, max_rows))
 
     def export_csv(self, filepath):
         """导出CSV"""
@@ -524,7 +560,12 @@ class ReportWindow(QDialog):
         if filepath:
             try:
                 current_tab = self.tabs.currentWidget()
-                if hasattr(current_tab, 'get_figure'):
+                if hasattr(current_tab, 'save_as_png'):
+                    # QWidget类Tab（如详情表）使用自身的渲染方法
+                    current_tab.save_as_png(filepath)
+                    QMessageBox.information(self, '导出成功', '图片已导出到:\n{}'.format(filepath))
+                elif hasattr(current_tab, 'get_figure'):
+                    # matplotlib图表Tab
                     current_tab.get_figure().savefig(filepath, dpi=150, bbox_inches='tight')
                     QMessageBox.information(self, '导出成功', '图片已导出到:\n{}'.format(filepath))
                 else:
