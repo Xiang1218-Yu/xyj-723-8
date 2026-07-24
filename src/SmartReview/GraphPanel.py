@@ -242,7 +242,10 @@ class GraphView(QGraphicsView):
                     involved.add(target)
                     pairs.append((word_obj.value, target))
 
-        # 创建节点,随机初始散布在一个圆内,给力导向一个起点
+        # 创建节点,随机初始散布在一个圆内,给力导向一个起点。
+        # 初始半径按节点数缩放(∝√n),让初始密度大致恒定:节点越多铺得越开,
+        # 这样空间网格每格的节点数才不会爆炸,近邻剪枝才真正有效。
+        spread = 200 + 22 * math.sqrt(max(len(involved), 1))
         for word in involved:
             # 目标关联词可能本身不在词库里(仅作为被指向的名字),此时信息用占位
             word_obj = book.data.get(word)
@@ -256,7 +259,7 @@ class GraphView(QGraphicsView):
             else:
                 node.set_detail('(该词不在当前词库中)', 0, '未知')
             angle = random.uniform(0, 2 * math.pi)
-            radius = random.uniform(0, 300)
+            radius = random.uniform(0, spread)
             node.setPos(math.cos(angle) * radius, math.sin(angle) * radius)
             self._scene.addItem(node)
             self.nodes[word] = node
@@ -284,7 +287,12 @@ class GraphView(QGraphicsView):
         """ 单步 Fruchterman-Reingold 力导向迭代。
         算法把图看成物理系统:所有节点两两带同种电荷互相排斥(斥力),
         有边相连的节点之间像弹簧一样互相吸引(引力)。反复迭代直到系统能量
-        趋于平衡,节点便自动散开成美观、少交叉的布局。 """
+        趋于平衡,节点便自动散开成美观、少交叉的布局。
+
+        性能:斥力原本需要 O(n²) 两两遍历,节点一多(500+)就会卡顿。
+        这里改用"空间网格(spatial grid)"做近邻剪枝——每个节点只与相邻网格
+        内的节点计算斥力,把平均复杂度降到约 O(n)(优于 O(n log n)),
+        从而支持数百节点流畅运行。 """
         # 迭代次数用尽 / 无节点时,停止定时器并把视图缩放到能看全
         if self._iterations_left <= 0 or not self.nodes:
             self._timer.stop()
@@ -302,23 +310,16 @@ class GraphView(QGraphicsView):
             a.vx = 0.0
             a.vy = 0.0
 
-        # ---- 斥力:任意两个节点互相推开(O(n^2) 两两遍历) ----
-        for i, a in enumerate(nodes):
-            for b in nodes[i + 1:]:  # 只遍历上三角,避免重复计算同一对
-                dx = a.x() - b.x()
-                dy = a.y() - b.y()
-                dist = math.hypot(dx, dy) or 0.01  # 防止两点重合导致除零
-                force = (k * k) / dist       # 斥力大小 ∝ k²/距离:越近推得越猛
-                # (dx/dist, dy/dist) 是 b→a 的单位方向向量,乘力得到分量
-                fx = dx / dist * force
-                fy = dy / dist * force
-                a.vx += fx; a.vy += fy       # a 被推离 b
-                b.vx -= fx; b.vy -= fy       # b 受反方向等大的力(牛顿第三定律)
+        # ---- 斥力:用空间网格做近邻剪枝,避免 O(n²) ----
+        self._accumulate_repulsion(nodes, k)
 
         # ---- 引力:仅相连节点互相拉近(遍历边) ----
         for edge in self.edges:
-            a = self.nodes[edge.source_word]
-            b = self.nodes[edge.target_word]
+            a = self.nodes.get(edge.source_word)
+            b = self.nodes.get(edge.target_word)
+            if a is None or b is None or a is b:
+                # 端点缺失(数据不一致)或自环边:都跳过,避免 KeyError / 除零发散
+                continue
             dx = a.x() - b.x()
             dy = a.y() - b.y()
             dist = math.hypot(dx, dy) or 0.01
@@ -341,6 +342,48 @@ class GraphView(QGraphicsView):
                      n.y() + n.vy / disp * limited)
 
         self._iterations_left -= 1
+
+    def _accumulate_repulsion(self, nodes, k):
+        """ 用均匀空间网格(spatial hashing)累加节点间斥力。
+
+        原理:斥力随距离衰减(∝ k²/dist),距离超过约 2k 后已可忽略。
+        因此把画布划分成边长 = cutoff 的方格,每个节点只需和"自己所在格 +
+        周围 8 格"内的节点计算斥力,而不必与全部节点比较。当节点大致均匀
+        分布时,每格节点数近似常数,总复杂度约 O(n)。 """
+        cutoff = 2.0 * k                 # 斥力作用半径:超出此距离忽略
+        cutoff = max(cutoff, 1.0)        # 防止 k 极小导致格子过密
+        cell = cutoff                    # 网格边长取作用半径,保证近邻只在相邻格
+
+        # 1) 建桶:cell_key(列, 行) -> 落在该格的节点列表
+        grid = {}
+        for n in nodes:
+            key = (int(math.floor(n.x() / cell)), int(math.floor(n.y() / cell)))
+            grid.setdefault(key, []).append(n)
+
+        # 2) 逐节点,仅在 3x3 邻域格内找候选,计算斥力
+        neighbor_offsets = [(-1, -1), (-1, 0), (-1, 1),
+                            (0, -1), (0, 0), (0, 1),
+                            (1, -1), (1, 0), (1, 1)]
+        for a in nodes:
+            cx = int(math.floor(a.x() / cell))
+            cy = int(math.floor(a.y() / cell))
+            for ox, oy in neighbor_offsets:
+                bucket = grid.get((cx + ox, cy + oy))
+                if not bucket:
+                    continue
+                for b in bucket:
+                    if b is a:            # 不和自己算力
+                        continue
+                    dx = a.x() - b.x()
+                    dy = a.y() - b.y()
+                    dist = math.hypot(dx, dy) or 0.01  # 防止重合导致除零
+                    if dist > cutoff:     # 超出作用半径,斥力可忽略,跳过
+                        continue
+                    force = (k * k) / dist            # 斥力 ∝ k²/距离
+                    # 注意:这里对 (a,b) 与 (b,a) 会各遍历一次,故只给 a 施力
+                    # (每个节点在自己的循环里都会被对方推),力大小天然对称。
+                    a.vx += dx / dist * force
+                    a.vy += dy / dist * force
 
     # ---------------- 边刷新 ----------------
     def _refresh_all_edges(self):
@@ -412,26 +455,29 @@ class GraphView(QGraphicsView):
 
     # ---------------- 交互:删除边 ----------------
     def request_delete_edge(self, edge):
-        """ 右键删除关联:同时修改底层数据 associate 集合 """
+        """ 右键删除关联:同步修改底层数据 associate 集合,再从场景移除该边。
+
+        注意:关联是有向的(source -> target),因此只从 source 的 associate
+        里移除 target,不动 target 自己的关联集,保证数据与图形一致。 """
         reply = QMessageBox.question(
             self, '删除关联',
             '确定要删除关联: {} → {} 吗?'.format(edge.source_word, edge.target_word),
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply != QMessageBox.Yes:
             return
-        # 更新数据模型
+        # 1) 同步更新数据模型:从源词的关联集中移除目标词
         src_obj = self.book.data.get(edge.source_word) if self.book else None
         if src_obj is not None and edge.target_word in src_obj.associate:
             src_obj.associate.remove(edge.target_word)
-        # 从场景中移除
+        # 2) 从场景与内部列表移除这条边
         self._scene.removeItem(edge)
         if edge in self.edges:
             self.edges.remove(edge)
-        # 清理不再有任何连接的孤立节点
+        # 3) 清理因此变成"零连接"的孤立节点(纯图形层面,不影响其它词的数据)
         self._prune_isolated_nodes()
 
     def _prune_isolated_nodes(self):
-        """ 删除没有任何边相连的孤立节点 """
+        """ 删除没有任何边相连的孤立节点(仅移除图元,不改动底层数据) """
         connected = set()
         for edge in self.edges:
             connected.add(edge.source_word)
@@ -440,6 +486,11 @@ class GraphView(QGraphicsView):
             if word not in connected:
                 self._scene.removeItem(self.nodes[word])
                 del self.nodes[word]
+
+    def rebuild(self):
+        """ 恢复默认布局 / 重建全图:根据 book.data 中最新的 associate 关系
+        重新构建整张图并重跑力导向布局。用于删边、增删关联后回到一致状态。 """
+        return self.load_book(self.book)
 
     # ---------------- 交互:搜索过滤 ----------------
     def filter_by_text(self, text):
@@ -494,9 +545,11 @@ class GraphPanel(QWidget):
         toolbar.addWidget(self.searchEdit)
         self.fitButton = QPushButton('适配全部')
         self.relayoutButton = QPushButton('重新布局')
+        self.rebuildButton = QPushButton('恢复默认布局')  # 依据最新关联数据重建全图
         self.resetButton = QPushButton('取消高亮')
         toolbar.addWidget(self.fitButton)
         toolbar.addWidget(self.relayoutButton)
+        toolbar.addWidget(self.rebuildButton)
         toolbar.addWidget(self.resetButton)
         layout.addLayout(toolbar)
 
@@ -512,18 +565,28 @@ class GraphPanel(QWidget):
         self.searchEdit.textChanged.connect(self.view.filter_by_text)
         self.fitButton.clicked.connect(self.view.fit_all)
         self.relayoutButton.clicked.connect(lambda: self.view.start_layout())
+        self.rebuildButton.clicked.connect(self._rebuild_graph)
         self.resetButton.clicked.connect(self.view.clear_highlight)
         self.view.nodeActivated.connect(self._on_node_activated)
 
     def show(self):
         """ 每次显示都基于最新数据重建图 """
+        self._reload_and_report()
+        super(GraphPanel, self).show()
+        self.raise_()
+        self.activateWindow()
+
+    def _reload_and_report(self):
+        """ 重建全图并刷新状态栏统计 """
         n_nodes, n_edges = self.view.load_book(self.book)
         self.statusLabel.setText('共 {} 个关联节点, {} 条关联边。'
                                  '单击高亮邻居 / 双击聚焦 / 右键删除关联。'
                                  .format(n_nodes, n_edges))
-        super(GraphPanel, self).show()
-        self.raise_()
-        self.activateWindow()
+        return n_nodes, n_edges
+
+    def _rebuild_graph(self):
+        """ "恢复默认布局"按钮:依据当前最新的 associate 数据重建整图 """
+        self._reload_and_report()
 
     def _on_node_activated(self, word):
         """ 双击节点时的回调:可用于联动主窗口(此处更新状态提示) """

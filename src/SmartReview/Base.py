@@ -130,38 +130,44 @@ class ReviewManage(object):
         self.__review_index = review_index or 0  # review_index 的值可能是负数,也能是一个很大的数!
 
     def slide_left(self):
-        """ 向左滑动 """
-        # 为了防止一个掌握的单词,因为曾经掌握 +100,结果十年没有复习了,现在已经不会了,借此快速降级
+        """ 复习索引左移一格:缩短下次复习间隔(单词变难记时调用)。
+        review_index 越小间隔越短,负数代表"顽固"区。 """
+        # 边界处理:若该词此前已滑过掌握末端(is_slide_over,索引很大),
+        # 说明是"曾经掌握、久未复习、如今忘光"的词,直接把索引拉回末端再 -1,
+        # 实现快速降级,避免从一个很大的索引慢慢一格格往回退。
         if self.is_slide_over:
-            self.__review_index = len(self.review_table)  # 快速归位
+            self.__review_index = len(self.review_table)  # 快速归位到末端
         self.__review_index -= 1
 
     def slide_right(self):
-        """ 向右滑动 """
-        # 为了防止一个顽固单词,曾经顽固 -100,结果现在已经会了,不过还没有偿还回来,借此快速升级
+        """ 复习索引右移一格:拉长下次复习间隔(单词记得更牢时调用)。 """
+        # 边界处理:若该词此前深陷"顽固"区(is_slide_below,索引为负),
+        # 说明是"曾经顽固、如今已会"的词,直接归位到 0 再 +1,实现快速升级,
+        # 不必从很深的负数一格格爬上来。
         if self.is_slide_below:
-            self.__review_index = 0  # 快速归位
+            self.__review_index = 0  # 快速归位到起点
         self.__review_index += 1
 
     @property
     def is_slide_over(self):
-        """ 该单词掌握 """
+        """ 是否已"滑过复习表末端":索引超过表长,代表长期掌握的单词 """
         return True if self.__review_index > len(self.review_table) else False
 
     @property
     def is_slide_below(self):
-        """ 顽固词汇 """
+        """ 是否已"滑到下界":索引为负,代表反复记不住的顽固词汇 """
         return True if self.__review_index < 0 else False
 
     @property
     def next_review_interval(self):
-        """ 距离下一次的复习间隔 """
+        """ 距离下一次复习的时间间隔(秒)。索引映射到 review_table 的小时数。 """
         index = self.__review_index
-        if index < 0:  # 如果index 过小,将索引定为0的返回
+        if index < 0:  # 索引为负(顽固):钳到 0,取最短间隔尽快复习
             index = 0
-        elif index >= len(self.review_table):  # 如果 index 超出列表最大索引值,每超过一个多3天!
+        elif index >= len(self.review_table):  # 索引超出表长(掌握):
+            # 以表内最大间隔为基础,每多滑一格再加 3 天(72 小时),越掌握越晚复习
             return self.review_table[-1] * 3600 + (index-len(self.review_table)) * 72 * 3600
-        return self.review_table[index] * 3600  # 滑动复习间隙 (小时转换成秒)
+        return self.review_table[index] * 3600  # 正常区间:查表得小时数,转成秒
 
     @property
     def next_review_timestamp(self) -> float:
@@ -177,7 +183,8 @@ class ReviewManage(object):
     def fix_time(self, predict_time):
         """ 人性化修正,背单词的开始时间 """
         before_pm = (predict_time - timedelta(days=1)).replace(hour=self.PM_h, minute=self.PM_m)  # 前一天晚上
-        cur_am = predict_time.replace(hour=self.AM_h, minute=self.AM_h)  # 当天上午
+        # 修复边界缺陷:分钟应取 AM_m(30),原代码误写成 AM_h 导致"今天上午"锚点算错
+        cur_am = predict_time.replace(hour=self.AM_h, minute=self.AM_m)  # 当天上午
         cur_pm = predict_time.replace(hour=self.PM_h, minute=self.PM_m)  # 当天下午
 
         if before_pm <= predict_time < cur_am:
@@ -303,32 +310,52 @@ class Vocabulary(object):
 
     @property
     def rank(self):
-        """ 单词的类别: 对单词的掌握度 """
-        index = -1  # 待定
+        """ 单词的掌握度状态机。
+
+        依据"最近一次背词的整批记录"(last_records,即最后一天的所有 Record)
+        推断该词当前处于哪个掌握度。rank_table 从优(index 0 精通)到劣
+        (index 7 顽固)、末位 index -1 为"待定"。判定规则如下:
+
+          - 无任何历史记录        -> 待定(index=-1),尚未评估
+          - 恰好 1 条记录且记住   -> 依据"是否已滑到复习表末端(掌握态)"再细分:
+                * 已滑过末端 + 思考很快(<2.3s) -> 精通
+                * 已滑过末端 + 思考较慢          -> 掌握
+                * 未滑过末端                    -> 记住(新学会,尚需巩固)
+          - 恰好 1 条"忘记"记录   -> 清晰(基本会,只错一次)
+          - ≤3 条"忘记"记录       -> 模糊(时对时错)
+          - >3 条"忘记"记录       -> 说明反复出错,再细分:
+                * 已滑到复习表下界(顽固标记) -> 顽固
+                * 否则若挂有关联/混淆词        -> 混淆
+                * 否则                        -> 忘记
+        """
+        index = -1  # 默认"待定":没有记录时的兜底状态
         try:
-            records = self.daylog.last_records
-            if len(records) == 1 and records[0].stats is True:  # 只有一个记录,状态为 True
-                if self.review.is_slide_over:  # 根据旧的状态,判断是否掌握了的单词
-                    if records[0].speed < 2.3:
+            records = self.daylog.last_records  # 最近一次背词的整批记录
+            # —— 分支 1:只背了一次且当次记住了 ——
+            if len(records) == 1 and records[0].stats is True:
+                # is_slide_over 表示复习索引已滑过复习表末端,代表长期掌握
+                if self.review.is_slide_over:
+                    if records[0].speed < 2.3:   # 思考耗时阈值:反应越快掌握越牢
                         index = 0  # 精通
                     else:
                         index = 1  # 掌握
                 else:
-                    index = 2  # 记住
-            elif len([record for record in records if record.stats is False]) == 1:  # 只有含有一个 False 状态
-                index = 3  # 清晰
-            elif len([record for record in records if record.stats is False]) <= 3:  # 只有含有小于3个 False 状态
-                index = 4  # 模糊
-            else:  # 忘记
-                if self.review.is_slide_below:  # 根据旧的状态,判断是否为顽固词汇
+                    index = 2  # 记住(刚学会,还没滑到掌握区)
+            # —— 分支 2:整批记录里"忘记(False)"的条数决定模糊程度 ——
+            elif len([record for record in records if record.stats is False]) == 1:
+                index = 3  # 清晰:仅错 1 次
+            elif len([record for record in records if record.stats is False]) <= 3:
+                index = 4  # 模糊:错 2~3 次
+            else:  # 忘记次数 >3,属于反复出错
+                if self.review.is_slide_below:   # 复习索引已滑到下界 -> 长期难记
                     index = 7  # 顽固
-                elif len(self.associate) != 0:
+                elif len(self.associate) != 0:   # 挂了关联词,多半是与它词混淆
                     index = 5  # 混淆
                 else:
                     index = 6  # 忘记
         except Error.RecordsIsNotExist:
-            logger.debug('last record is not exist')
-        return self.rank_table[index]  # 获取中文解释
+            logger.debug('last record is not exist')  # 无记录 -> 保持"待定"
+        return self.rank_table[index]  # 把 index 映射成中文状态名
 
     @classmethod
     def default_ranks_chooses(cls):
@@ -365,20 +392,27 @@ class Vocabulary(object):
         return self
 
     def update_status(self):
-        """ 保存单词的记录,更新单词的评级 """
+        """ 收尾本次背词:把临时记录落盘,并按掌握度调整复习间隔索引。
+
+        复习索引(review_index)控制下一次复习的时间间隔——右移=间隔变长
+        (记得越牢、越晚再复习),左移=间隔变短(越易忘、越早再复习)。
+        依据本次评定出的 rank 决定滑动方向,形成"记得好→拉长、记不住→拉近"
+        的艾宾浩斯式自适应节奏: """
         try:
-            self.daylog.update_records()  # 在序列化前,将结果存入日志表
-        except Error.UpdateRecordsFailed:  # 如果不存在日志表就不动
+            self.daylog.update_records()  # 先把本次的临时 records 归档进多级日志
+        except Error.UpdateRecordsFailed:  # 本次没有任何记录则跳过,不调整索引
             pass
         else:
-            # 精通,掌握,记住,清晰后移,待定与模糊不动,混淆,忘记,顽固前移
-            word_type = self.rank  # 调整 review_index 的位置
+            # 精通/掌握/记住/清晰:掌握较好 -> 右移,拉长复习间隔
+            # 待定/模糊:状态不明朗 -> 不动,维持当前间隔
+            # 混淆/忘记/顽固:掌握差 -> 左移,缩短复习间隔尽快再背
+            word_type = self.rank  # 依据最新记录评定当前掌握度
             if word_type in ['精通', '掌握', '记住', '清晰']:
                 self.review.slide_right()
             elif word_type in ['混淆', '忘记', '顽固']:
                 self.review.slide_left()
             else:
-                pass
+                pass  # 待定 / 模糊:保持索引不变
 
     def dumps(self):
         """ 序列化 """
