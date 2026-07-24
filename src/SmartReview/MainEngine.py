@@ -5,8 +5,12 @@
 # @File    : MainEngine.py
 # @Software: PyCharm
 from SmartReview.UI import UIBase, UIConfig, UISearch
+from SmartReview.UI.UIGraphPanel import GraphPanel
+from SmartReview.UI.UIReport import ReportDialog
+from SmartReview.UI.UIConfigEx import ConfigDialogEx
 from PyQt5.QtCore import pyqtSlot, pyqtSignal
-from PyQt5.QtWidgets import QMainWindow, QDialog, QTableWidgetItem, QTableWidget, QAction
+from PyQt5.QtWidgets import (QMainWindow, QDialog, QTableWidgetItem, QTableWidget,
+                             QAction, QPushButton, QMessageBox)
 from PyQt5.QtCore import Qt, QObject
 from PyQt5 import QtGui
 from SmartReview.Tactics import LearnTactics
@@ -173,26 +177,89 @@ class MainWindow(QMainWindow, UIBase.Ui_MainWindow):
     def __init__(self, *args, **kwargs):
         super(MainWindow, self).__init__(*args, **kwargs)
         self.setupUi(self)  # 安装 UI
-        self.configDialog = ConfigDialog()
-        self.book = self.configDialog.book
-        self.searchDialog = SearchDialog.LoadFrom(self.configDialog.book, self)
+
+        # 使用增强版配置对话框(长度/首字母/关联/笔记/预览/预设)
+        self.book = LearnTactics.loadFrom()
+        self.configDialog = ConfigDialogEx(book=self.book)
+        self.searchDialog = SearchDialog.LoadFrom(self.book, self)
+
         self.word = None  # 单词本身
         self.completed = False  # 背单词机器的标识, True 代表背词结束
         self.timeStart = None  # 按下去的时间戳
         self.timeEnd = None  # 松开的时间戳
         self.timeSpeed = None  # 按压的时间
+
+        # 新功能面板(延迟创建): 关联词图 + 学习报告
+        self.graphPanel = None
+        self.reportDialog = None
+        self._build_extra_buttons()
+
         self.word_explain.hide()  # 刚开始不显示 word_explain
         self.word_status.hide()  # 刚开始不显示 word_status
         self.install_signals_and_slots()  # 安装信号槽机制
-        
+
         if len(self.book) > 0 and len(self.book.reviewList) == 0:
             self.book.select(count=100)
+
+    def _build_extra_buttons(self):
+        """ 在界面右下角动态添加 [关联词图] [学习报告] 两个按钮 """
+        self.graphButton = QPushButton('关联词图', self.centralwidget)
+        self.graphButton.setGeometry(500, 12, 100, 30)
+        self.graphButton.setToolTip('打开全局关联有向图面板')
+
+        self.reportButton = QPushButton('学习报告', self.centralwidget)
+        self.reportButton.setGeometry(610, 12, 100, 30)
+        self.reportButton.setToolTip('打开独立学习报告窗口')
 
     def install_signals_and_slots(self):
         self.auto_speaker.toggled[bool].connect(self.muteEvent)  # 智能朗读
         self.word_status.toggled[bool].connect(self.switchStatus)  # 记住与忘记的状态转换
         self.configButton.clicked[bool].connect(self.configDialog.show)  # 显示配置界面
         self.associationButton.clicked[bool].connect(self.searchDialog.show)  # 配置添加关联词
+        self.graphButton.clicked[bool].connect(self.open_graph_panel)
+        self.reportButton.clicked[bool].connect(self.open_report_dialog)
+
+    # ------------------------------------------------------------- 新功能
+    def open_graph_panel(self, *_):
+        """ 打开/激活全局关联词图面板 """
+        if self.graphPanel is None:
+            self.graphPanel = GraphPanel(book=self.book, parent=self)
+            self.graphPanel.jump_to_word.connect(self.on_jump_to_word)
+        else:
+            # 数据可能已变化, 重建图
+            self.graphPanel.reload_graph()
+        # 非模态弹窗, 便于对照主界面
+        self.graphPanel.show()
+        self.graphPanel.raise_()
+        self.graphPanel.activateWindow()
+
+    def open_report_dialog(self, *_):
+        """ 打开学习报告窗口 """
+        # 每次都重新聚合数据, 以反映最新状态
+        self.reportDialog = ReportDialog(book=self.book, parent=self)
+        self.reportDialog.show()
+
+    @pyqtSlot(str)
+    def on_jump_to_word(self, word_value):
+        """ 从图面板双击节点后, 主界面直接跳转到该单词并展示释义 """
+        target = self.book.get(word_value)
+        if target is None:
+            QMessageBox.warning(self, '未找到', '词库中不存在单词: {}'.format(word_value))
+            return
+        # 中断当前流程, 直接展示目标词释义(不影响 reviewList 队列)
+        self.word = target
+        self.completed = False
+        self.word_current.hide()
+        self.word_explain.show()
+        self.word_explain.setText(target.explain)
+        self.word_explain.setAlignment(Qt.AlignCenter)
+        self.word_before.setText(target.value)
+        association = ' | '.join(target.associate)
+        self.associationLabel.setText(association or '无关联词')
+        self.word_status.show()
+        self.auto_speaker.show()
+        self.say(target.value, speaker='Ava')
+
 
     @pyqtSlot(bool)
     def muteEvent(self, turn_on):
@@ -295,9 +362,12 @@ class MainWindow(QMainWindow, UIBase.Ui_MainWindow):
             self.timeSpeed = self.timeEnd - self.timeStart
             self.setExplain()
         if QKeyEvent.key() == Qt.Key_Escape:  # 如果松开 Escape 就保存
-            self.configDialog.book.save()
+            self.book.save()
             self.say('已保存!')
             self.word_before.setText('已保存')
+            # 保存后刷新关联词图(若已打开), 反映最新掌握度颜色
+            if self.graphPanel is not None and self.graphPanel.isVisible():
+                self.graphPanel.refresh()
 
     # def mousePressEvent(self, QMouseEvent):
     #     """ 鼠标按下事件 """

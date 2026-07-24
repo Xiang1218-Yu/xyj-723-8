@@ -282,12 +282,13 @@ class Vocabulary(object):
     """ 词汇 """
     rank_table = ['精通', '掌握', '记住', '清晰', '模糊', '混淆', '忘记', '顽固', '待定']  # 精通,掌握,记住,清晰后移,待定与模糊不动,混淆,忘记,顽固前移
 
-    def __init__(self, word, explain, review_index=None, datas=None, associate=None):
+    def __init__(self, word, explain, review_index=None, datas=None, associate=None, notes=''):
         # super(Vocabulary, self).__init__()
         self.value = word  # 词汇
         self.explain = explain  # 释义
         self.daylog = DayLog.load(datas)  # 多级日志表
         self.associate = Associate.load(associate)  # 关联词
+        self.notes = notes or ''  # 自定义笔记(可选, 兼容旧数据)
         self.review = ReviewManage.load(self.daylog, review_index)  # 复习管理
 
     def __repr__(self):
@@ -360,8 +361,9 @@ class Vocabulary(object):
         data = dic.get('data')
         review_index = dic.get('review_index')
         associate = dic.get('associate')
+        notes = dic.get('notes', '')  # 兼容旧数据, 默认空字符串
         # 将 row_data 中的值都转换成 record 类型,因为是二级列表所以才会下面这么麻烦
-        self = cls(word, explain, review_index, data, associate)
+        self = cls(word, explain, review_index, data, associate, notes)
         return self
 
     def update_status(self):
@@ -384,7 +386,8 @@ class Vocabulary(object):
         """ 序列化 """
         return {'word': self.value, 'explain': self.explain, 'review_index': self.review.dump(),
                 'data': self.daylog.dump(),
-                'associate': self.associate.dump()}
+                'associate': self.associate.dump(),
+                'notes': self.notes}
 
 
 class Dictionary(UserDict):
