@@ -5,6 +5,7 @@ def get_install_requires():
 	install_requires = ['PyQt5>=5.9.2',
 					 'tqdm>=4.19.5',
 					 'requests>=2.18.4',
+					 'matplotlib>=3.0.0',
 					]
 	if 'darwin' in sys.platform: # MacOS 系统
 		pass
